@@ -182,26 +182,40 @@ bool PollDInputGamepad(const HidColl& c, DeviceStatus& s) {
 
 void Poll8BitDo(PollContext& ctx) {
     for (auto [vid, pid] : ctx.Products(kVid)) {
+        DeviceStatus s;
+        bool haveReading = false;
         for (const HidColl* c : ctx.Find(vid, pid, [](const HidColl& c) {
                  return (c.page() == 0xFF7A || c.page() == 0xFFA0) && c.usage() == 0x0001 &&
                         c.inLen() >= 64 && c.outLen() >= 64;
              })) {
-            DeviceStatus s;
             if (PollVendorCollection(*c, s)) {
-                ctx.Add(s, vid, pid);
+                haveReading = true;
                 break;
             }
         }
-        if (!ctx.IsClaimed(vid, pid) && FindModel(pid)) {
+
+        // The vendor channel can report a wired/charging-like sub-state with no live percent
+        // even while the controller is still paired over RF: some third-party stands charge the
+        // receiver's controller through contacts without turning the radio off, and the
+        // controller's own firmware then tells the dongle it is in that charging sub-state
+        // (internal PID 6012) instead of answering the battery-level query. The plain HID
+        // gamepad report, when the receiver also exposes one, carries the controller's own
+        // battery byte straight off its live input reports, so try that too whenever the vendor
+        // channel came back without a real percent (including the "asleep" case for the genuine
+        // 8BitDo dock, where this read will simply find nothing and the asleep status stands).
+        if ((!haveReading || s.percent < 0) && FindModel(pid)) {
             for (const HidColl* c : ctx.Find(vid, pid, [](const HidColl& c) {
                      return c.page() == 0x01 && (c.usage() == 0x05 || c.usage() == 0x04) && c.inLen() >= 15;
                  })) {
-                DeviceStatus s;
-                if (PollDInputGamepad(*c, s)) {
-                    ctx.Add(s, vid, pid);
+                DeviceStatus sd;
+                if (PollDInputGamepad(*c, sd)) {
+                    s = sd;
+                    haveReading = true;
                     break;
                 }
             }
         }
+
+        if (haveReading) ctx.Add(s, vid, pid);
     }
 }
